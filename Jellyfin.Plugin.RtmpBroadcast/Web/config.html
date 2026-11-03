@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>RTMP Broadcast</title></head>
+<body>
+<div id="TwitchBroadcastConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
+     data-require="emby-input,emby-button,emby-select,emby-checkbox">
+    <div data-role="content" class="content-primary">
+        <h1>RTMP Broadcast</h1>
+        <h2>Broadcast controls</h2>
+        <p id="jtbStatus" role="status">Checking the broadcast…</p>
+        <p id="jtbAcceleration" class="fieldDescription" hidden></p>
+        <p>Play a video in Jellyfin Web, then select its playback session here.</p>
+        <div class="selectContainer">
+            <label class="selectLabel" for="jtbSession">Playback session</label>
+            <select id="jtbSession" is="emby-select" disabled></select>
+        </div>
+        <button id="jtbStart" is="emby-button" type="button" class="raised button-submit" disabled>Start broadcast</button>
+        <button id="jtbStop" is="emby-button" type="button" class="raised" disabled>End broadcast</button>
+        <h2>RTMP destination</h2>
+        <p id="jtbConfigured">Checking destination…</p>
+        <form id="jtbForm" autocomplete="off">
+            <div class="inputContainer">
+                <label class="inputLabel" for="jtbUrl">Publish URL</label>
+                <input id="jtbUrl" is="emby-input" type="password" autocomplete="off" spellcheck="false" required>
+                <p class="fieldDescription">Enter the full RTMP or RTMPS address. Include a stream key or token if your receiver requires one. The saved URL stays on the server.</p>
+            </div>
+            <button id="jtbSave" is="emby-button" type="submit" class="raised button-submit" disabled>Save destination</button>
+        </form>
+        <p id="jtbResult" role="status"></p>
+        <h2>Stream quality</h2>
+        <p>Saved settings apply when the next broadcast starts.</p>
+        <form id="jtbQualityForm">
+            <div class="selectContainer">
+                <label class="selectLabel" for="jtbHeight">Output resolution</label>
+                <select id="jtbHeight" is="emby-select" disabled>
+                    <option value="480">480p</option>
+                    <option value="720">720p</option>
+                    <option value="1080" selected>1080p</option>
+                </select>
+            </div>
+            <div class="inputContainer">
+                <label class="inputLabel" for="jtbBitrate">Video bitrate (kb/s)</label>
+                <input id="jtbBitrate" is="emby-input" type="number" inputmode="numeric" required
+                       min="500" max="12000" step="1" value="4500" aria-describedby="jtbBitrateHint" disabled>
+                <p id="jtbBitrateHint" class="fieldDescription">Enter a whole number from 500 to 12,000.</p>
+            </div>
+            <button id="jtbSaveQuality" is="emby-button" type="submit" class="raised button-submit" disabled>Save quality</button>
+        </form>
+        <p id="jtbQualityResult" role="status"></p>
+        <h2>Twitch chat overlay</h2>
+        <p id="jtbChatStatus" role="status">Checking chat connection…</p>
+        <form id="jtbChatForm" autocomplete="off">
+            <div class="checkboxContainer checkboxContainer-withDescription">
+                <label>
+                    <input id="jtbChatEnabled" type="checkbox" is="emby-checkbox" aria-describedby="jtbChatHint" disabled>
+                    <span>Show Twitch chat on the broadcast</span>
+                </label>
+                <p id="jtbChatHint" class="fieldDescription checkboxFieldDescription">Messages from this channel appear in the outgoing video. Changes apply to the next broadcast.</p>
+            </div>
+            <div class="inputContainer">
+                <label class="inputLabel" for="jtbChatChannel">Twitch channel</label>
+                <input id="jtbChatChannel" is="emby-input" type="text" spellcheck="false" autocapitalize="none"
+                       aria-describedby="jtbChatChannelHint" disabled>
+                <p id="jtbChatChannelHint" class="fieldDescription">Enter the channel name, with or without the leading #.</p>
+            </div>
+            <button id="jtbSaveChat" is="emby-button" type="submit" class="raised button-submit" disabled>Save chat settings</button>
+        </form>
+        <p id="jtbChatResult" role="status"></p>
+    </div>
+    <script>
+    (() => {
+        'use strict';
+        const page = document.querySelector('#TwitchBroadcastConfigPage:not([data-initialized])');
+        if (!page) return;
+        page.dataset.initialized = 'true';
+        const get = id => page.querySelector('#jtb' + id);
+        let timer, reading = false, changing = false, revision = 0, qualityEdited = false, chatEdited = false;
+
+        async function request(action, method = 'GET', body) {
+            const api = window.ApiClient;
+            if (!api?.getCurrentUserId()) throw new Error('Sign in as a Jellyfin administrator.');
+            const url = new URL(api.getUrl('TwitchBroadcast/' + action), location.href);
+            if (url.origin !== location.origin) throw new Error('Open Jellyfin Web from your server’s own address.');
+            const headers = { Accept: 'application/json' };
+            api.setRequestHeaders(headers);
+            if (body) headers['Content-Type'] = 'application/json';
+            const response = await fetch(url, {
+                method, headers, body: body && JSON.stringify(body), mode: 'same-origin',
+                redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(10000)
+            });
+            if (!response.ok) {
+                if (response.status === 401 || response.status === 403) throw new Error('Jellyfin administrator access is required.');
+                if (response.status === 409) throw new Error('The broadcast or playback session changed. Check its status and retry.');
+                throw new Error('Plugin request failed (HTTP ' + response.status + ').');
+            }
+            if (method === 'GET') return response.json();
+        }
+
+        function disable() {
+            for (const id of ['Session', 'Start', 'Stop', 'Save', 'Height', 'Bitrate', 'SaveQuality',
+                              'ChatEnabled', 'ChatChannel', 'SaveChat']) get(id).disabled = true;
+        }
+
+        async function refresh() {
+            if (reading || changing) return;
+            const version = revision;
+            reading = true;
+            try {
+                const [status, sessions] = await Promise.all([request('Status'), request('Sessions')]);
+                if (version !== revision || changing) return;
+                const output = status.state === 'playing' ? 'On air' : 'RTMP output · ' + status.state;
+                get('Status').textContent = status.active
+                    ? [output, status.itemName].filter(Boolean).join(' · ') : 'Off air';
+                get('Acceleration').textContent = status.accelerationStatus || '';
+                get('Acceleration').hidden = !status.accelerationStatus;
+                get('Configured').textContent = status.configured ? 'A publish URL is saved.' : 'Set a publish URL before starting a broadcast.';
+                const select = get('Session');
+                const previous = select.value;
+                select.replaceChildren(...sessions.map(session => {
+                    const option = new Option(session.itemName + ' · ' + session.deviceName, session.id);
+                    option.dataset.item = session.itemId;
+                    return option;
+                }));
+                if (!sessions.length) select.add(new Option('No active playback sessions', ''));
+                if (sessions.some(s => s.id === previous)) select.value = previous;
+                select.disabled = !sessions.length || status.active;
+                get('Start').disabled = !sessions.length || !status.configured || status.active;
+                get('Stop').disabled = !status.active;
+                get('Save').disabled = status.active;
+                const height = String(status.outputHeight ?? 1080);
+                const bitrate = String(status.videoBitrateKbps ?? 4500);
+                if (!qualityEdited) {
+                    get('Height').value = height;
+                    get('Bitrate').value = bitrate;
+                }
+                qualityEdited = get('Height').value !== height || get('Bitrate').valueAsNumber !== Number(bitrate);
+                get('Height').disabled = false;
+                get('Bitrate').disabled = false;
+                get('SaveQuality').disabled = !qualityEdited;
+                const enabled = status.chatEnabled === true;
+                const channel = status.chatChannel || '';
+                if (!chatEdited) {
+                    get('ChatEnabled').checked = enabled;
+                    get('ChatChannel').value = channel;
+                }
+                chatEdited = get('ChatEnabled').checked !== enabled || get('ChatChannel').value !== channel;
+                get('ChatEnabled').disabled = false;
+                get('ChatChannel').disabled = false;
+                get('ChatChannel').required = get('ChatEnabled').checked;
+                get('SaveChat').disabled = !chatEdited;
+                get('ChatStatus').textContent = status.chatStatus ? 'Chat connection · ' + status.chatStatus : 'No active chat connection.';
+            } catch (error) {
+                if (version !== revision || changing) return;
+                disable();
+                get('Status').textContent = error.message;
+                get('Acceleration').hidden = true;
+                get('Configured').textContent = 'Destination status unavailable.';
+                get('ChatStatus').textContent = 'Chat connection status unavailable.';
+            } finally {
+                reading = false;
+            }
+        }
+
+        async function mutate(action, body, confirmation, feedback = get('Result')) {
+            if (changing) return;
+            revision++;
+            changing = true;
+            disable();
+            feedback.textContent = 'Sending…';
+            try {
+                await request(action, 'POST', body);
+                feedback.textContent = confirmation;
+            } catch (error) {
+                feedback.textContent = error.message;
+            } finally {
+                changing = false;
+                await refresh();
+            }
+        }
+
+        get('Start').onclick = () => {
+            const option = get('Session').selectedOptions[0];
+            if (option?.value && option.dataset.item) {
+                mutate('Start', { sessionId: option.value, itemId: option.dataset.item }, 'Broadcast requested.');
+            }
+        };
+        get('Stop').onclick = () => mutate('Stop', undefined, 'Broadcast ended.');
+        get('Form').onsubmit = event => {
+            event.preventDefault();
+            const url = get('Url').value.trim();
+            if (get('Save').disabled) return;
+            if (!/^rtmps?:\/\//i.test(url)) {
+                get('Result').textContent = 'Enter an RTMP or RTMPS URL.';
+                return;
+            }
+            get('Url').value = '';
+            mutate('Destination', { url }, 'Destination saved.');
+        };
+        function editQuality() {
+            qualityEdited = true;
+            get('SaveQuality').disabled = changing;
+            get('QualityResult').textContent = '';
+        }
+        get('Height').onchange = editQuality;
+        get('Bitrate').oninput = editQuality;
+        get('QualityForm').onsubmit = event => {
+            event.preventDefault();
+            if (get('SaveQuality').disabled || changing) return;
+            const outputHeight = Number(get('Height').value);
+            const videoBitrateKbps = get('Bitrate').valueAsNumber;
+            if (![480, 720, 1080].includes(outputHeight) || !Number.isInteger(videoBitrateKbps)
+                    || videoBitrateKbps < 500 || videoBitrateKbps > 12000) {
+                get('QualityResult').textContent = 'Choose a listed resolution and a whole-number bitrate from 500 to 12,000 kb/s.';
+                return;
+            }
+            mutate('Quality', { outputHeight, videoBitrateKbps }, 'Quality saved for the next broadcast.', get('QualityResult'));
+        };
+        function editChat() {
+            chatEdited = true;
+            get('ChatChannel').required = get('ChatEnabled').checked;
+            get('SaveChat').disabled = changing;
+            get('ChatResult').textContent = '';
+        }
+        get('ChatEnabled').onchange = editChat;
+        get('ChatChannel').oninput = editChat;
+        get('ChatForm').onsubmit = event => {
+            event.preventDefault();
+            if (get('SaveChat').disabled || changing) return;
+            const enabled = get('ChatEnabled').checked;
+            const raw = get('ChatChannel').value.trim();
+            if ((enabled || raw) && !/^#?[a-zA-Z0-9_]{1,25}$/.test(raw)) {
+                get('ChatResult').textContent = 'Use 1 to 25 letters, numbers or underscores for the channel name.';
+                get('ChatChannel').focus();
+                return;
+            }
+            const channel = raw.replace(/^#/, '').toLowerCase();
+            get('ChatChannel').value = channel;
+            mutate('Chat', { enabled, channel }, 'Chat settings saved for the next broadcast.', get('ChatResult'));
+        };
+        function show() {
+            clearInterval(timer);
+            refresh();
+            timer = setInterval(refresh, 4000);
+        }
+        page.addEventListener('viewshow', show);
+        function hide() {
+            clearInterval(timer);
+            revision++;
+            get('Url').value = '';
+        }
+        page.addEventListener('viewhide', hide);
+        page.addEventListener('viewdestroy', hide);
+        show();
+    })();
+    </script>
+</div>
+</body>
+</html>

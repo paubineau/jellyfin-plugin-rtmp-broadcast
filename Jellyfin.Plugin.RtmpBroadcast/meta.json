@@ -1,0 +1,12 @@
+{
+  "guid": "d5d3a401-8609-4f19-9b37-2428e3ef6ab3",
+  "name": "RTMP Broadcast",
+  "overview": "Broadcast the video you're watching in Jellyfin Web.",
+  "description": "Publish an administrator's Jellyfin Web playback to an RTMP or RTMPS server. Follow pauses, seeks, and the selected subtitle track, with optional on-screen Twitch chat.",
+  "category": "General",
+  "version": "0.1.0.0",
+  "targetAbi": "12.4.0.0",
+  "status": "Active",
+  "autoUpdate": true,
+  "assemblies": ["Jellyfin.Plugin.RtmpBroadcast.dll"]
+}

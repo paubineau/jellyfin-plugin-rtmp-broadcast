@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Version>0.1.0.0</Version>
+    <RootNamespace>Jellyfin.Plugin.RtmpBroadcast</RootNamespace>
+    <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="RtmpBroadcast.Tests" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Jellyfin.Controller" Version="12.4.0" ExcludeAssets="runtime" />
+    <!-- Use the drawing and text-shaping libraries shipped with Jellyfin 12.4. -->
+    <PackageReference Include="SkiaSharp" Version="3.119.4" IncludeAssets="compile" PrivateAssets="all" />
+    <PackageReference Include="SkiaSharp.HarfBuzz" Version="3.119.4" IncludeAssets="compile" PrivateAssets="all" />
+    <EmbeddedResource Include="Web/config.html" />
+    <EmbeddedResource Include="Web/player.js" />
+  </ItemGroup>
+  <Target Name="PackagePlugin" DependsOnTargets="Build">
+    <PropertyGroup>
+      <PackageRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)', 'package-$(Version)'))</PackageRoot>
+      <PackageDist>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '..', 'dist'))</PackageDist>
+    </PropertyGroup>
+    <MakeDir Directories="$(PackageDist)" />
+    <Copy SourceFiles="$(TargetPath);$(MSBuildProjectDirectory)/meta.json;$(MSBuildProjectDirectory)/../README.md;$(MSBuildProjectDirectory)/../LICENSE"
+          DestinationFolder="$(PackageRoot)" />
+    <ZipDirectory SourceDirectory="$(PackageRoot)"
+                  DestinationFile="$(PackageDist)RtmpBroadcast-$(Version)-jf12.4.zip" Overwrite="true" />
+  </Target>
+</Project>
